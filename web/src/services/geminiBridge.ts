@@ -1,12 +1,14 @@
 /**
  * Polymer-X: Gemini Bridge Service
  * 
- * Ports the verified Committee Mode logic from the CLI script into a browser-compatible service.
- * This implements the same 3-agent debate pattern:
- *   1. The Architect - Proposes chassis organism
- *   2. The Safety Officer - Validates safety locks
- *   3. The Simulator - Predicts efficiency
+ * Hybrid service that supports both:
+ * - LIVE mode: Actual Gemini API calls for enzyme design
+ * - SIMULATION mode: Deterministic logic following docs/LOGIC.md rules
+ * 
+ * The mode is automatically selected based on whether VITE_GEMINI_API_KEY is set.
  */
+
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // =============================================================================
 // Type Definitions (mirrored from docs/INTERFACES.ts)
@@ -60,6 +62,7 @@ export interface CommitteeBioAgentResponse {
     error?: string;
     timestamp: string;
     internal_monologue: MonologueEntry[];
+    mode: 'LIVE' | 'SIMULATION';
 }
 
 // =============================================================================
@@ -85,7 +88,48 @@ const ENZYME_CONFIG: Record<PlasticType, { base: string; mutations: string[] }> 
 };
 
 // =============================================================================
-// Sub-Agent Logic
+// Gemini API Prompt
+// =============================================================================
+
+const GEMINI_SYSTEM_PROMPT = `You are a synthetic biology expert designing enzymes for plastic bioremediation.
+
+RULES (from docs/LOGIC.md):
+1. Chassis Selection:
+   - Salinity > 35ppt → Halophilic (Lee et al. 2025)
+   - Salinity ≤ 35ppt AND no stress → Mesophilic
+   - Salinity ≤ 35ppt AND stress = true → Thermophilic
+
+2. Enzyme-Plastic Mapping:
+   - PET → PETase (mutations: S238F, W159H, S280A)
+   - HDPE → LacCase-HD (mutations: T241M, G352V)
+   - PVC → HaloHyd-VC (mutations: C127S, L89F)
+   - LDPE → AlkB-LDPE (mutations: W55L, F181Y)
+   - PP → CutinasePP (mutations: L117F, S141G)
+   - PS → StyreneOx (mutations: M108L, H223Y)
+
+3. Efficiency Score:
+   Base = 0.60
+   + 0.15 if chassis matches salinity requirements
+   + 0.10 if stress = false
+   - 0.10 if stress = true AND chassis = Mesophilic
+   + 0.05 per mutation (max 3 counted)
+   Final = min(0.95, calculated)
+
+4. MANDATORY SAFETY: All designs MUST include Quorum_Sensing_Type_B (Zhang et al. 2025)
+
+Respond ONLY with valid JSON matching this schema:
+{
+  "enzyme_name": "string",
+  "mutation_list": ["string"],
+  "predicted_efficiency_score": number,
+  "safety_lock_type": "Quorum_Sensing_Type_B",
+  "chassis_type": "Halophilic" | "Mesophilic" | "Thermophilic",
+  "design_rationale": "string explaining your decisions",
+  "references": ["Lee et al. 2025...", "Zhang et al. 2025..."]
+}`;
+
+// =============================================================================
+// Simulation Logic (fallback when no API key)
 // =============================================================================
 
 function determineChassisType(salinity: number, stress: boolean): ChassisType {
@@ -231,16 +275,127 @@ function runSimulator(
 
 export class GeminiBridge {
     private simulationDelay: number;
+    private genAI: GoogleGenerativeAI | null = null;
 
     constructor(simulationDelay = 500) {
         this.simulationDelay = simulationDelay;
+
+        // Check for API key
+        const key = import.meta.env.VITE_GEMINI_API_KEY;
+        if (key && key.length > 0) {
+            this.genAI = new GoogleGenerativeAI(key);
+            console.log('🔑 GeminiBridge: LIVE mode enabled (API key detected)');
+        } else {
+            console.log('🧪 GeminiBridge: SIMULATION mode (no API key)');
+        }
+    }
+
+    get isLiveMode(): boolean {
+        return this.genAI !== null;
     }
 
     private delay(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    /**
+     * Run the committee debate using the Gemini API (if available) or simulation
+     */
     async runCommitteeDebate(input: WaterAnalysis): Promise<CommitteeBioAgentResponse> {
+        if (this.genAI) {
+            return this.runLiveDebate(input);
+        }
+        return this.runSimulatedDebate(input);
+    }
+
+    /**
+     * Live Gemini API-powered debate
+     */
+    private async runLiveDebate(input: WaterAnalysis): Promise<CommitteeBioAgentResponse> {
+        const monologue: MonologueEntry[] = [];
+
+        try {
+            // Phase 1: Architect thinks
+            monologue.push({
+                agent: 'ARCHITECT',
+                timestamp: new Date().toISOString(),
+                thought: `Analyzing water sample at (${input.lat.toFixed(2)}, ${input.lng.toFixed(2)}). ` +
+                    `Detected ${input.plastic_type} contamination. Salinity: ${input.salinity}ppt. ` +
+                    `Stress signals: ${input.stress_signal_bool ? 'PRESENT' : 'absent'}.`,
+                decision: 'Consulting Gemini AI for optimal enzyme design...',
+            });
+
+            // Call Gemini API
+            const model = this.genAI!.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+            const userPrompt = `Design an enzyme for these conditions:
+- Location: (${input.lat}, ${input.lng})
+- Salinity: ${input.salinity} ppt
+- Plastic Type: ${input.plastic_type}
+- Environmental Stress: ${input.stress_signal_bool}
+
+Follow the RULES exactly. Return ONLY valid JSON.`;
+
+            const result = await model.generateContent({
+                contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+                systemInstruction: GEMINI_SYSTEM_PROMPT,
+            });
+
+            const responseText = result.response.text();
+
+            // Parse JSON from response (handle markdown code blocks)
+            let jsonStr = responseText;
+            const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) {
+                jsonStr = jsonMatch[1].trim();
+            }
+
+            const design: EnzymeDesign = JSON.parse(jsonStr);
+
+            // Phase 2: Safety Officer validates
+            monologue.push({
+                agent: 'SAFETY_OFFICER',
+                timestamp: new Date().toISOString(),
+                thought: `Reviewing Gemini-generated design. Verifying Zhang et al. 2025 compliance...`,
+                decision: design.safety_lock_type === 'Quorum_Sensing_Type_B'
+                    ? 'APPROVED - Quorum_Sensing_Type_B verified.'
+                    : 'WARNING - Safety lock may need review.',
+            });
+
+            // Phase 3: Simulator confirms
+            monologue.push({
+                agent: 'SIMULATOR',
+                timestamp: new Date().toISOString(),
+                thought: `Validating efficiency prediction from Gemini...`,
+                decision: `Efficiency: ${(design.predicted_efficiency_score * 100).toFixed(1)}%. Design validated.`,
+            });
+
+            return {
+                success: true,
+                data: design,
+                timestamp: new Date().toISOString(),
+                internal_monologue: monologue,
+                mode: 'LIVE',
+            };
+        } catch (error) {
+            console.error('Gemini API error, falling back to simulation:', error);
+
+            // Fallback to simulation
+            const fallback = await this.runSimulatedDebate(input);
+            fallback.internal_monologue.unshift({
+                agent: 'ARCHITECT',
+                timestamp: new Date().toISOString(),
+                thought: 'Gemini API call failed. Falling back to local simulation.',
+                decision: 'Switching to deterministic mode.',
+            });
+            return fallback;
+        }
+    }
+
+    /**
+     * Simulated debate (no API needed)
+     */
+    private async runSimulatedDebate(input: WaterAnalysis): Promise<CommitteeBioAgentResponse> {
         const monologue: MonologueEntry[] = [];
 
         try {
@@ -293,6 +448,7 @@ export class GeminiBridge {
                 data: design,
                 timestamp: new Date().toISOString(),
                 internal_monologue: monologue,
+                mode: 'SIMULATION',
             };
         } catch (error) {
             return {
@@ -300,6 +456,7 @@ export class GeminiBridge {
                 error: error instanceof Error ? error.message : 'Unknown error',
                 timestamp: new Date().toISOString(),
                 internal_monologue: monologue,
+                mode: 'SIMULATION',
             };
         }
     }

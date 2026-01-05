@@ -6,28 +6,25 @@ import OceanMap from './components/OceanMap';
  * 
  * Main entry point for the web UI.
  * 
- * To enable Google Maps 3D Tiles:
- * 1. Get an API key from Google Cloud Console
- * 2. Enable Maps JavaScript API and Map Tiles API
- * 3. Pass the key to OceanMap component
+ * Features:
+ * - Interactive ocean map with click-to-deploy location selection
+ * - Control panel for salinity, plastic type, and stress parameters
+ * - Committee Mode: 3-agent debate (Architect, Safety Officer, Simulator)
+ * - Physarum slime mold visualization for enzyme spread
+ * - Gemini API integration (optional) with simulation fallback
  * 
- * Without an API key, a fallback ocean gradient is displayed.
+ * Environment Variables:
+ * - VITE_GEMINI_API_KEY: Enable live Gemini API mode
+ * - VITE_GOOGLE_MAPS_API_KEY: Enable 3D Google Maps
  */
 
 function App() {
-  // Optional: Add your Google Maps API key here
-  // const GOOGLE_MAPS_API_KEY = 'YOUR_API_KEY';
+  // Read API keys from environment
+  const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
   return (
     <div className="w-full h-full bg-[#0a0a1a]">
-      <OceanMap
-      // apiKey={GOOGLE_MAPS_API_KEY}
-      />
-
-      {/* Version Badge */}
-      <div className="fixed bottom-4 right-4 glass rounded-lg px-3 py-1.5 text-xs text-gray-400">
-        POLYMER-X v0.2 • Committee Mode
-      </div>
+      <OceanMap apiKey={googleMapsApiKey} />
     </div>
   );
 }
